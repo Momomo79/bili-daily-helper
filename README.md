@@ -18,7 +18,7 @@
 ## 安装
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)（或 Violentmonkey）。
-2. 打开本仓库的 `bili-daily-helper.user.js`，点 **Raw**，脚本管理器会自动弹出安装页。
+2. 打开本仓库的 `B站每日任务助手.user.js`，点 **Raw**，脚本管理器会自动弹出安装页。
    - 也可以把文件下载下来，拖进管理器的「实用工具 → 导入」。
 
 ## 使用
