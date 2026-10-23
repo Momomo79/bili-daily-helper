@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         B站每日任务助手 · 自动完成每日奖励
-// @namespace    https://local/bili-daily-helper
+// @namespace    https://github.com/Momomo79/bili-daily-helper
 // @version      1.3.0
 // @description  自动完成哔哩哔哩网页版每日任务：观看视频、分享视频、投币，带面板与每日自动运行。
 // @author       Momomo
+// @license      MIT
 // @match        https://www.bilibili.com/*
 // @match        https://space.bilibili.com/*
 // @match        https://t.bilibili.com/*
