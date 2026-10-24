@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站每日任务助手 · 自动完成每日奖励
 // @namespace    https://github.com/Momomo79/bili-daily-helper
-// @version      1.3.0
+// @version      1.4.0
 // @description  自动完成哔哩哔哩网页版每日任务：观看视频、分享视频、投币，带面板与每日自动运行。
 // @author       Momomo
 // @license      MIT
@@ -28,7 +28,7 @@
   if (window.__BDH_LOADED__) return;
   window.__BDH_LOADED__ = true;
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const NS = 'bili-daily-helper';
   const KEY_CFG = NS + ':cfg';
   const KEY_STATE = NS + ':state';
@@ -641,6 +641,19 @@
       border-radius: 5px; padding: 2px 5px; font-size: 11px; text-align: center;
     }
     .tip { margin-top: 6px; font-size: 10px; color: #7b7d8c; line-height: 1.45; }
+    .fab {
+      display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px 0 10px;
+      border-radius: 999px; cursor: pointer; user-select: none; white-space: nowrap;
+      background: rgba(31,32,38,.94); color: #e6e6e8; font-size: 12px; font-weight: 600;
+      border: 1px solid rgba(251,114,153,.5); box-shadow: 0 6px 20px rgba(0,0,0,.4);
+      backdrop-filter: blur(6px); transition: border-color .15s, transform .15s;
+    }
+    .fab:hover { border-color: #fb7299; transform: translateY(-1px); }
+    .fab .dot { width: 7px; height: 7px; border-radius: 50%; background: #5a5c66; flex: 0 0 auto; }
+    .fab .badge { color: #85879a; font-weight: 400; font-size: 11px; }
+    .fab[data-s="doing"] .dot { background: #ffb02e; animation: pulse 1s infinite; }
+    .fab[data-s="ok"] .dot { background: #46c46a; }
+    .fab[data-s="fail"] .dot { background: #ff5c5c; }
   `;
 
   function panelHTML() {
@@ -648,11 +661,14 @@
       `<div class="task" data-t="${t.key}" data-s="idle"><i class="dot"></i><span class="name">${t.label}</span><span class="st">待执行</span></div>`
     ).join('');
     return `
+      <div class="fab" data-act="open" data-s="idle" title="B站每日任务助手（点击展开）">
+        <i class="dot"></i><span>每日任务</span><span class="badge">0/0</span>
+      </div>
       <div class="panel">
         <div class="head">
           <span class="title">B站每日任务</span>
           <span class="ver">v${VERSION}</span>
-          <button class="ico" data-act="min" title="最小化">—</button>
+          <button class="ico" data-act="min" title="收起">—</button>
           <button class="ico" data-act="hide" title="隐藏（可从油猴菜单重新打开）">×</button>
         </div>
         <div class="body">
@@ -688,16 +704,20 @@
       (document.body || document.documentElement).appendChild(this.host);
 
       this.el = this.shadow.querySelector('.panel');
+      this.fab = this.shadow.querySelector('.fab');
       this.body = this.shadow.querySelector('.body');
       this.logBox = this.shadow.querySelector('.log');
       this.settings = this.shadow.querySelector('.settings');
       this.runBtn = this.shadow.querySelector('[data-act="run"]');
-      this.minimized = false;
+      this.collapsed = true;
+      this.dragged = false;
 
       this.restorePos();
       this.bind();
       this.syncSettings();
       this.setButtons();
+      this.applyCollapsed();
+      this.updateFab();
     }
 
     restorePos() {
@@ -719,7 +739,8 @@
         if (a === 'run') runAll('手动');
         else if (a === 'stop') stopAll();
         else if (a === 'cfg') this.settings.classList.toggle('show');
-        else if (a === 'min') this.toggleMin();
+        else if (a === 'open') { if (this.dragged) { this.dragged = false; return; } this.open(); }
+        else if (a === 'min') this.collapse();
         else if (a === 'hide') this.hide();
       });
 
@@ -741,39 +762,74 @@
         cfg[key] = val;
         saveConfig();
         log(`设置已保存：${key} = ${val}`);
+        this.updateFab();
       });
 
-      const head = this.shadow.querySelector('.head');
+      this.bindDrag(this.shadow.querySelector('.head'), false);
+      this.bindDrag(this.fab, true);
+    }
+
+    bindDrag(handle, fromSelf) {
       let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
-      head.addEventListener('pointerdown', (e) => {
-        if (e.target.closest('[data-act]')) return;
+      handle.addEventListener('pointerdown', (e) => {
+        if (!fromSelf && e.target.closest('[data-act]')) return;
         const r = this.el.getBoundingClientRect();
+        const fr = this.fab.getBoundingClientRect();
+        const box = this.collapsed ? fr : r;
         dragging = true;
-        sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
-        this.host.style.left = r.left + 'px';
-        this.host.style.top = r.top + 'px';
-        this.host.style.right = 'auto';
-        this.host.style.bottom = 'auto';
-        head.setPointerCapture(e.pointerId);
+        this.dragged = false;
+        sx = e.clientX; sy = e.clientY; ox = box.left; oy = box.top;
+        handle.setPointerCapture(e.pointerId);
       });
-      head.addEventListener('pointermove', (e) => {
+      handle.addEventListener('pointermove', (e) => {
         if (!dragging) return;
-        const left = Math.max(0, Math.min(window.innerWidth - 60, ox + e.clientX - sx));
-        const top = Math.max(0, Math.min(window.innerHeight - 30, oy + e.clientY - sy));
+        const dx = e.clientX - sx, dy = e.clientY - sy;
+        if (!this.dragged && Math.abs(dx) + Math.abs(dy) < 5) return;
+        this.dragged = true;
+        const left = Math.max(0, Math.min(window.innerWidth - 60, ox + dx));
+        const top = Math.max(0, Math.min(window.innerHeight - 30, oy + dy));
         this.host.style.left = left + 'px';
         this.host.style.top = top + 'px';
+        this.host.style.right = 'auto';
+        this.host.style.bottom = 'auto';
       });
-      head.addEventListener('pointerup', (e) => {
+      handle.addEventListener('pointerup', (e) => {
         if (!dragging) return;
         dragging = false;
-        try { head.releasePointerCapture(e.pointerId); } catch (err) {}
-        store.set(KEY_POS, { left: parseInt(this.host.style.left, 10) || 0, top: parseInt(this.host.style.top, 10) || 0 });
+        try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
+        if (this.dragged) {
+          store.set(KEY_POS, { left: parseInt(this.host.style.left, 10) || 0, top: parseInt(this.host.style.top, 10) || 0 });
+        }
       });
     }
 
-    toggleMin() {
-      this.minimized = !this.minimized;
-      this.body.classList.toggle('hide', this.minimized);
+    applyCollapsed() {
+      this.el.style.display = this.collapsed ? 'none' : '';
+      this.fab.style.display = this.collapsed ? '' : 'none';
+    }
+
+    open() {
+      this.collapsed = false;
+      this.applyCollapsed();
+    }
+
+    collapse() {
+      this.collapsed = true;
+      this.updateFab();
+      this.applyCollapsed();
+    }
+
+    updateFab() {
+      const keys = TASK_DEFS.filter((t) =>
+        t.key === 'login' ||
+        (t.key === 'watch' && cfg.enableWatch) ||
+        (t.key === 'share' && cfg.enableShare) ||
+        (t.key === 'coin' && cfg.enableCoin)
+      ).map((t) => t.key);
+      const done = keys.filter((k) => (state.tasks[k] || {}).status === 'ok').length;
+      const failed = keys.some((k) => (state.tasks[k] || {}).status === 'fail');
+      this.fab.querySelector('.badge').textContent = `${done}/${keys.length}`;
+      this.fab.dataset.s = state.running ? 'doing' : failed ? 'fail' : (done === keys.length && done > 0) ? 'ok' : 'idle';
     }
 
     hide() {
@@ -782,6 +838,7 @@
 
     show() {
       this.host.style.display = '';
+      this.open();
     }
 
     get visible() {
@@ -818,6 +875,7 @@
       const label = (TASK_DEFS.find((t) => t.key === key) || {}).label || key;
       st.textContent = text || { idle: '待执行', doing: '执行中', ok: '完成', fail: '失败', skip: '已关闭' }[status] || '';
       st.title = `${label}：${st.textContent}`;
+      this.updateFab();
     }
   }
 
@@ -835,7 +893,7 @@
   }
 
   function setRunningUI(running) {
-    if (panel) panel.setButtons();
+    if (panel) { panel.setButtons(); panel.updateFab(); }
     if (running) log('执行中…（点「停止」可中断）');
   }
 
@@ -847,7 +905,7 @@
       panel = null;
     }
 
-    log(`已加载 v${VERSION}，右下角面板可拖动。建议在 www.bilibili.com 使用。`);
+    log(`已加载 v${VERSION}，右下角「每日任务」胶囊点一下展开设置面板。建议在 www.bilibili.com 使用。`);
     const dom = readRewardPanel();
     if (dom) {
       const part = Object.keys(dom).map((k) => {

@@ -2,7 +2,7 @@
 
 一个适配哔哩哔哩网页端的油猴脚本，自动完成个人中心「每日奖励」里的日常任务，并核对经验是否真的到账。
 
-![version](https://img.shields.io/badge/version-1.3.0-fb7299) ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-00a1d6)
+![version](https://img.shields.io/badge/version-1.4.0-fb7299) ![platform](https://img.shields.io/badge/platform-Tampermonkey%20%7C%20Violentmonkey-00a1d6)
 
 ## 功能
 
@@ -23,13 +23,19 @@
 
 ## 使用
 
-打开 `www.bilibili.com` 任意页面，右下角会出现面板：
+打开 `www.bilibili.com` 任意页面，右下角只有一个收起的小胶囊：
 
-- **开始执行**：手动跑一遍。
-- **最小化 / 隐藏**：收起面板（隐藏后可从 Tampermonkey 菜单重新打开）。
-- 面板可拖动，位置会记住。
+```
+● 每日任务  2/4
+```
 
-默认在打开主站时自动跑一次，每天最多自动尝试 2 次（给失败留一次重试的机会）。
+- **点胶囊**：展开完整面板（任务进度、日志、立即执行、设置）。
+- 胶囊左边的小圆点就是状态灯：灰=待执行，黄=执行中，绿=全部完成，红=有失败。
+- 右侧 `2/4` 是今天已完成的任务数 / 启用中的任务数，不用展开就能看出今天跑没跑。
+- 面板标题栏的 **—** 收起回胶囊，**×** 完全隐藏（隐藏后从 Tampermonkey 菜单重新打开）。
+- 胶囊和面板都能拖动，位置会记住。
+
+默认在打开主站时自动跑一次，每天最多自动尝试 2 次（给失败留一次重试的机会）。自动执行时不会弹面板，胶囊上的灯和数字会跟着变。
 
 ### 设置项
 
