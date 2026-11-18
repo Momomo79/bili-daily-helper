@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站每日任务助手 · 自动完成每日奖励
 // @namespace    https://github.com/Momomo79/bili-daily-helper
-// @version      1.4.0
-// @description  自动完成哔哩哔哩网页版每日任务：观看视频、分享视频、投币，带面板与每日自动运行。
+// @version      2.0.0
+// @description  自动完成哔哩哔哩网页版每日任务：观看视频、分享视频、投币；面板实时显示经验值与升级天数预测。
 // @author       Momomo
 // @license      MIT
 // @match        https://www.bilibili.com/*
@@ -10,7 +10,6 @@
 // @match        https://t.bilibili.com/*
 // @match        https://account.bilibili.com/*
 // @match        https://message.bilibili.com/*
-// @icon         https://s1.hdslb.com/bfs/static/jinkela/long/images/512.png
 // @icon         https://www.bilibili.com/favicon.ico
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -28,35 +27,40 @@
   if (window.__BDH_LOADED__) return;
   window.__BDH_LOADED__ = true;
 
-  const VERSION = '1.4.0';
+  const VERSION = '2.0.0';
   const NS = 'bili-daily-helper';
   const KEY_CFG = NS + ':cfg';
   const KEY_STATE = NS + ':state';
   const KEY_POS = NS + ':pos';
+  const KEY_EXP = NS + ':exp';
+  const DAILY_MAX_EXP = 65;
 
   const DEFAULT_CONFIG = {
-    enableWatch: true,      // 观看视频（后台小窗静音播放，完成「每日观看」经验）
-    enableShare: true,      // 分享视频（每日分享 +5 经验）
-    enableCoin: true,       // 投币（每日投币 +经验，注意：消耗真实硬币）
-    watchSeconds: 60,       // 观看时长（秒），60 秒足够触发每日观看
-    coinExpTarget: 50,      // 每日投币想拿到多少经验（每枚 +10，即面板上的「已获得X/50」）；10 = 只做基础任务
-    selectLike: false,      // 投币时是否顺手点赞
-    autoRun: true,          // 打开 www.bilibili.com 时自动跑一次
-    maxRunsPerDay: 2,       // 每天最多自动尝试次数（有任务失败时留一次重试）
-    panelRight: 16,         // 面板初始位置（距右/下，px）
+    enableWatch: true,
+    enableShare: true,
+    enableCoin: true,
+    watchSeconds: 60,
+    coinExpTarget: 50,
+    selectLike: false,
+    autoRun: true,
+    maxRunsPerDay: 2,
+    panelRight: 16,
     panelBottom: 16
   };
 
   const API = {
-    nav:        'https://api.bilibili.com/x/web-interface/nav',
-    reward:     'https://api.bilibili.com/x/member/web/exp/reward',
-    share:      'https://api.bilibili.com/x/web-interface/share/add',
-    coinAdd:    'https://api.bilibili.com/x/web-interface/coin/add',
-    coinState:  'https://api.bilibili.com/x/web-interface/archive/coins',
-    ranking:    'https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all',
-    popular:    'https://api.bilibili.com/x/web-interface/popular',
-    toview:     'https://api.bilibili.com/x/v2/history/toview'
+    nav: 'https://api.bilibili.com/x/web-interface/nav',
+    reward: 'https://api.bilibili.com/x/member/web/exp/reward',
+    share: 'https://api.bilibili.com/x/web-interface/share/add',
+    coinAdd: 'https://api.bilibili.com/x/web-interface/coin/add',
+    coinState: 'https://api.bilibili.com/x/web-interface/archive/coins',
+    ranking: 'https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all',
+    popular: 'https://api.bilibili.com/x/web-interface/popular',
+    toview: 'https://api.bilibili.com/x/v2/history/toview'
   };
+
+  const timeFmt = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const numFmt = new Intl.NumberFormat('zh-CN');
 
   const store = {
     get(key, def) {
@@ -101,19 +105,35 @@
     tasks: {}
   };
 
+  let logQueue = [];
+  let logRaf = 0;
+
   function log(msg) {
-    const line = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${msg}`;
     try { console.log('[B站每日任务]', msg); } catch (e) {}
-    if (panel) panel.appendLog(line);
+    logQueue.push(`[${timeFmt.format(new Date())}] ${msg}`);
+    if (logQueue.length > 300) logQueue.splice(0, logQueue.length - 300);
+    if (!logRaf) logRaf = requestAnimationFrame(flushLog);
+  }
+
+  function flushLog() {
+    logRaf = 0;
+    if (!logQueue.length) return;
+    const lines = logQueue;
+    logQueue = [];
+    if (panel) panel.appendLogs(lines);
   }
 
   function sleep(ms) {
     return new Promise((resolve) => {
-      const t = setTimeout(resolve, ms);
+      if (state.aborted) return resolve();
       const sig = state.signal;
-      if (sig && typeof sig.addEventListener === 'function') {
-        sig.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
-      }
+      const done = () => {
+        clearTimeout(timer);
+        if (sig) sig.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      if (sig) sig.addEventListener('abort', done, { once: true });
     });
   }
 
@@ -132,13 +152,17 @@
     });
   }
 
+  function idle(fn) {
+    if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(fn, { timeout: 2500 });
+    else setTimeout(fn, 220);
+  }
+
   function short(t, n = 18) {
     const s = String(t || '').replace(/\s+/g, ' ').trim();
     return s.length > n ? s.slice(0, n) + '…' : (s || '(无标题)');
   }
 
-  function shuffle(arr) {
-    const a = arr.slice();
+  function shuffle(a) {
     for (let i = a.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [a[i], a[j]] = [a[j], a[i]];
@@ -177,42 +201,97 @@
 
   function request(method, url, params) {
     const isPost = method.toUpperCase() !== 'GET';
-    const payload = isPost ? toForm(params) : null;
-    const fullUrl = (!isPost && params) ? url + (url.indexOf('?') >= 0 ? '&' : '?') + toForm(params) : url;
+    const body = isPost ? toForm(params) : null;
+    const full = (!isPost && params) ? url + (url.indexOf('?') >= 0 ? '&' : '?') + toForm(params) : url;
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
 
-    const viaFetch = () => fetch(fullUrl, {
+    const viaFetch = () => fetch(full, {
       method: isPost ? 'POST' : 'GET',
       credentials: 'include',
-      headers: isPost ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {},
-      body: isPost ? payload : undefined
+      signal: ctrl ? ctrl.signal : undefined,
+      headers: isPost ? { 'Content-Type': 'application/x-www-form-urlencoded' } : undefined,
+      body: isPost ? body : undefined
     }).then((r) => r.text()).then((txt) => {
-      try { return JSON.parse(txt); } catch (e) { throw new Error('接口返回不是 JSON'); }
+      try { return JSON.parse(txt); } catch (e) { throw new Error('接口返回异常'); }
     });
 
     return viaFetch().catch((err) => {
+      if (err && err.name === 'AbortError') throw new Error('请求超时');
       if (typeof GM_xmlhttpRequest !== 'function') throw err;
       return new Promise((resolve, reject) => {
-        const headers = { 'Referer': 'https://www.bilibili.com/' };
+        const headers = { Referer: 'https://www.bilibili.com/' };
         if (isPost) headers['Content-Type'] = 'application/x-www-form-urlencoded';
         GM_xmlhttpRequest({
           method: isPost ? 'POST' : 'GET',
-          url: fullUrl,
-          data: payload || undefined,
+          url: full,
+          data: body || undefined,
           timeout: 20000,
           headers,
           onload: (res) => {
-            try { resolve(JSON.parse(res.responseText)); } catch (e) { reject(new Error('接口返回不是 JSON')); }
+            try { resolve(JSON.parse(res.responseText)); } catch (e) { reject(new Error('接口返回异常')); }
           },
           onerror: () => reject(new Error('网络错误')),
           ontimeout: () => reject(new Error('请求超时'))
         });
       });
-    });
+    }).finally(() => { if (timer) clearTimeout(timer); });
   }
 
-  async function checkLogin() {
+  async function navInfo() {
     const r = await request('GET', API.nav);
-    return !!(r && r.code === 0 && r.data && r.data.isLogin);
+    if (!r || r.code !== 0 || !r.data) throw new Error('登录状态接口返回异常');
+    return r.data;
+  }
+
+  let rewardCache = { at: 0, val: null };
+
+  function readRewardPanel(force) {
+    const now = Date.now();
+    if (!force && rewardCache.val && now - rewardCache.at < 1200) return rewardCache.val;
+    const labels = ['每日登录', '每日观看视频', '每日投币', '每日分享视频'];
+    const res = {};
+    let found = 0;
+    const root = document.body || document.documentElement;
+    let walker = null;
+    try {
+      walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    } catch (e) { walker = null; }
+    let node = walker ? walker.nextNode() : null;
+    let steps = 0;
+    while (node && found < 4 && steps < 60000) {
+      steps++;
+      const cur = node;
+      node = walker.nextNode();
+      const raw = cur.nodeValue;
+      if (!raw || raw.length > 26) continue;
+      const txt = raw.replace(/\s+/g, '');
+      if (!txt) continue;
+      let hit = null;
+      for (let j = 0; j < labels.length; j++) {
+        if (txt.indexOf(labels[j]) === 0) { hit = labels[j]; break; }
+      }
+      if (!hit || res[hit]) continue;
+      let box = cur.parentElement;
+      if (!box) continue;
+      let info = '';
+      for (let k = 0; k < 4 && box; k++) {
+        const bt = (box.textContent || '').replace(/\s+/g, '');
+        let multi = 0;
+        for (let j = 0; j < labels.length; j++) if (bt.indexOf(labels[j]) >= 0) multi++;
+        if (multi > 1) break;
+        if (/已获得\d+\/\d+|经验值到手|已完成/.test(bt)) { info = bt; break; }
+        box = box.parentElement;
+      }
+      if (!info) continue;
+      found++;
+      const m = info.match(/已获得(\d+)\/(\d+)/);
+      if (m) res[hit] = { done: Number(m[1]) >= Number(m[2]), exp: Number(m[1]), target: Number(m[2]) };
+      else res[hit] = { done: /经验值到手|已完成/.test(info), exp: null, target: null };
+    }
+    const val = found ? res : null;
+    rewardCache = { at: now, val };
+    return val;
   }
 
   async function readTasks() {
@@ -235,36 +314,6 @@
     return out;
   }
 
-  function readRewardPanel() {
-    const labels = ['每日登录', '每日观看视频', '每日投币', '每日分享视频'];
-    const res = {};
-    let nodes;
-    try { nodes = document.querySelectorAll('div,li,dd,span,p'); } catch (e) { return null; }
-    for (const el of nodes) {
-      let txt = '';
-      try { txt = (el.textContent || '').replace(/\s+/g, ''); } catch (e) { continue; }
-      if (!txt || txt.length > 30) continue;
-      const hit = labels.find((l) => txt.indexOf(l) === 0);
-      if (!hit || res[hit]) continue;
-      let box = el.parentElement;
-      let info = '';
-      for (let i = 0; i < 4 && box; i++) {
-        const bt = (box.textContent || '').replace(/\s+/g, '');
-        if (labels.filter((l) => bt.indexOf(l) >= 0).length > 1) break;
-        if (/已获得\d+\/\d+|经验值到手|已完成/.test(bt)) { info = bt; break; }
-        box = box.parentElement;
-      }
-      if (!info) continue;
-      const m = info.match(/已获得(\d+)\/(\d+)/);
-      if (m) {
-        res[hit] = { done: Number(m[1]) >= Number(m[2]), exp: Number(m[1]), target: Number(m[2]) };
-      } else {
-        res[hit] = { done: /经验值到手|已完成/.test(info), exp: null, target: null };
-      }
-    }
-    return Object.keys(res).length ? res : null;
-  }
-
   function coinProgress(st) {
     const raw = Number(cfg.coinExpTarget);
     const target = Math.max(0, Math.min(50, Math.round((Number.isFinite(raw) ? raw : 50) / 10) * 10));
@@ -276,15 +325,67 @@
     return { exp, target, need: Math.max(0, Math.ceil((target - exp) / 10)) };
   }
 
+  let expInfo = null;
+
+  function applyExp(data) {
+    const li = (data && data.level_info) || {};
+    const info = {
+      level: Number(li.current_level) || 0,
+      exp: Number(li.current_exp) || 0,
+      min: Number(li.current_min) || 0,
+      next: Number(li.next_exp) || 0,
+      uname: (data && data.uname) || '',
+      at: Date.now()
+    };
+    expInfo = info;
+    store.set(KEY_EXP, info);
+    return info;
+  }
+
+  function expSummary(info, st) {
+    if (!info) return null;
+    const max = !info.next || info.next <= info.exp || info.level >= 6;
+    const remain = max ? 0 : Math.max(0, info.next - info.exp);
+    let todayLeft = DAILY_MAX_EXP;
+    if (st) {
+      todayLeft = 0;
+      if (!st.login) todayLeft += 5;
+      if (!st.watch) todayLeft += 5;
+      if (!st.share) todayLeft += 5;
+      todayLeft += Math.max(0, 50 - Math.min(50, (Number(st.coins) || 0) * 10));
+    }
+    const days = max ? 0 : Math.max(1, Math.ceil(Math.max(0, remain - todayLeft) / DAILY_MAX_EXP) + (todayLeft > 0 ? 1 : 0));
+    return {
+      max,
+      remain,
+      todayLeft,
+      days,
+      ratio: max ? 1 : Math.min(1, info.exp / info.next)
+    };
+  }
+
+  function refreshExp(st, silent) {
+    return navInfo().then((d) => {
+      if (!d.isLogin) throw new Error('未登录');
+      const info = applyExp(d);
+      if (panel) panel.renderExp(info, st || null);
+      return info;
+    }).catch((e) => {
+      if (!silent) log('⚠️ 经验值读取失败：' + e.message);
+      if (panel) panel.renderExp(expInfo, st || null);
+      return null;
+    });
+  }
+
   async function doShare(v) {
     const csrf = getCsrf();
-    if (!csrf) throw new Error('拿不到 bili_jct（bili_jct），请确认已登录');
+    if (!csrf) throw new Error('拿不到 bili_jct，请确认已登录');
     return request('POST', API.share, { aid: v.aid, bvid: v.bvid, csrf });
   }
 
   async function doCoin(v, multiply) {
     const csrf = getCsrf();
-    if (!csrf) throw new Error('拿不到 bili_jct（bili_jct），请确认已登录');
+    if (!csrf) throw new Error('拿不到 bili_jct，请确认已登录');
     return request('POST', API.coinAdd, {
       aid: v.aid,
       multiply,
@@ -303,23 +404,23 @@
 
   async function collectVideos() {
     const out = [];
-    const push = (aid, bvid, title, owner) => {
-      const id = Number(aid);
-      if (!id || out.some((v) => v.aid === id)) return;
-      out.push({ aid: id, bvid: bvid || av2bv(id), title: title || '', owner: owner || '' });
+    const seen = new Set();
+    const push = (v) => {
+      const id = Number(v && v.aid);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({ aid: id, bvid: v.bvid || av2bv(id), title: v.title || '', owner: (v.owner && v.owner.name) || '' });
     };
-    try {
-      const r = await request('GET', API.ranking);
-      if (r && r.code === 0) (r.data.list || []).forEach((v) => push(v.aid, v.bvid, v.title, v.owner && v.owner.name));
-    } catch (e) {}
-    try {
-      const r = await request('GET', API.popular, { ps: 30, pn: 1 });
-      if (r && r.code === 0) (r.data.list || []).forEach((v) => push(v.aid, v.bvid, v.title, v.owner && v.owner.name));
-    } catch (e) {}
-    try {
-      const r = await request('GET', API.toview);
-      if (r && r.code === 0) (r.data.list || []).forEach((v) => push(v.aid, v.bvid, v.title, v.owner && v.owner.name));
-    } catch (e) {}
+    const results = await Promise.allSettled([
+      request('GET', API.ranking),
+      request('GET', API.popular, { ps: 30, pn: 1 }),
+      request('GET', API.toview)
+    ]);
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      const data = r.value && r.value.code === 0 ? r.value.data : null;
+      if (data && Array.isArray(data.list)) data.list.forEach(push);
+    }
     return shuffle(out);
   }
 
@@ -332,7 +433,7 @@
 
   async function watchTask(seconds) {
     if (location.hostname !== 'www.bilibili.com') {
-      throw new Error('观看任务需要在 www.bilibili.com 页面执行（跨子域 iframe 会被 X-Frame-Options 拦下）');
+      throw new Error('观看任务需要在 www.bilibili.com 页面执行');
     }
     const vids = await ensureVideos();
     let lastErr = null;
@@ -357,8 +458,6 @@
     frame.style.cssText = 'position:fixed;left:-9999px;top:0;width:800px;height:450px;border:0;opacity:0;pointer-events:none;';
     frame.src = url;
     document.body.appendChild(frame);
-
-    const cleanup = () => { try { frame.remove(); } catch (e) {} };
 
     try {
       const video = await waitFor(() => {
@@ -387,7 +486,7 @@
         lastPos = pos;
         if (stall === 8) {
           stall = 0;
-          log('⚠️ 播放进度没动：请切回本标签页，或在浏览器设置里允许后台标签页播放');
+          log('⚠️ 播放进度没动：请切回本标签页，或允许后台标签页播放');
           try { await video.play(); } catch (e) {}
         }
       }
@@ -395,7 +494,7 @@
       log(`✅ 播放完成：${short(v.title)}`);
       return v;
     } finally {
-      cleanup();
+      try { frame.remove(); } catch (e) {}
     }
   }
 
@@ -414,15 +513,17 @@
 
     try {
       setTask('login', 'doing', '检查中');
-      let loggedIn = false;
-      try { loggedIn = await checkLogin(); } catch (e) { log('⚠️ 登录状态查询失败：' + e.message); }
-      if (!loggedIn) {
+      let me = null;
+      try { me = await navInfo(); } catch (e) { log('⚠️ 登录状态查询失败：' + e.message); }
+      if (!me || !me.isLogin) {
         setTask('login', 'fail', '未登录');
         log('❌ 当前未登录，请先登录 B 站账号再执行');
         return;
       }
       state.counted = true;
       setTask('login', 'ok', '已登录');
+      const info = applyExp(me);
+      if (panel) panel.renderExp(info, null);
 
       let st = null;
       try { st = await readTasks(); } catch (e) { log('⚠️ 任务状态读取失败：' + e.message); }
@@ -432,6 +533,7 @@
         setTask('watch', st.watch ? 'ok' : 'idle', st.watch ? '今日已完成' : '待执行');
         setTask('share', st.share ? 'ok' : 'idle', st.share ? '今日已完成' : '待执行');
         setTask('coin', st.coins > 0 ? 'ok' : 'idle', `投币经验 ${p0.exp}/${p0.target}`);
+        if (expInfo) panel && panel.renderExp(expInfo, st);
       }
 
       if (cfg.enableShare && !state.aborted) {
@@ -522,11 +624,13 @@
         await sleep(1200);
         try {
           const st2 = await readTasks();
-          log(`执行后状态：登录${st2.login ? '√' : '×'} 观看${st2.watch ? '√' : '×'} 分享${st2.share ? '√' : '×'} 投币 ${coinProgress(st2).exp}/${cfg.coinExpTarget} 经验`);
+          const p2 = coinProgress(st2);
+          log(`执行后状态：登录${st2.login ? '√' : '×'} 观看${st2.watch ? '√' : '×'} 分享${st2.share ? '√' : '×'} 投币 ${p2.exp}/${p2.target} 经验`);
           setTask('login', st2.login ? 'ok' : 'fail', st2.login ? '已登录' : '未登录');
           if (cfg.enableWatch) setTask('watch', st2.watch ? 'ok' : 'fail', st2.watch ? '今日已完成' : '未完成');
           if (cfg.enableShare) setTask('share', st2.share ? 'ok' : 'fail', st2.share ? '今日已完成' : '未完成');
-          if (cfg.enableCoin) { const p2 = coinProgress(st2); setTask('coin', p2.need <= 0 ? 'ok' : 'fail', `投币经验 ${p2.exp}/${p2.target}`); }
+          if (cfg.enableCoin) setTask('coin', p2.need <= 0 ? 'ok' : 'fail', `投币经验 ${p2.exp}/${p2.target}`);
+          await refreshExp(st2, true);
         } catch (e) {
           log('⚠️ 复查失败：' + e.message);
         }
@@ -563,8 +667,9 @@
 
   function notifyDone() {
     if (typeof GM_notification !== 'function') return;
-    const failed = Object.keys(state.tasks).filter((k) => state.tasks[k] && state.tasks[k].status === 'fail');
-    const ok = Object.keys(state.tasks).filter((k) => state.tasks[k] && state.tasks[k].status === 'ok');
+    const keys = Object.keys(state.tasks);
+    const failed = keys.filter((k) => state.tasks[k] && state.tasks[k].status === 'fail');
+    const ok = keys.filter((k) => state.tasks[k] && state.tasks[k].status === 'ok');
     if (!ok.length) return;
     try {
       GM_notification({
@@ -576,84 +681,115 @@
   }
 
   const TASK_DEFS = [
-    { key: 'login',    label: '登录状态' },
-    { key: 'watch',    label: '观看视频' },
-    { key: 'share',    label: '分享视频' },
-    { key: 'coin',     label: '投币' }
+    { key: 'login', label: '登录状态' },
+    { key: 'watch', label: '观看视频' },
+    { key: 'share', label: '分享视频' },
+    { key: 'coin', label: '投币' }
   ];
+
+  const ICON = {
+    cfg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h8M16 7h4M4 17h4M12 17h8"/><circle cx="14" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>',
+    min: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M5 12h14"/></svg>',
+    hide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M20 12a8 8 0 1 1-2.6-5.9"/><path d="M20 4v5h-5"/></svg>'
+  };
 
   const PANEL_CSS = `
     :host { all: initial; }
-    * { box-sizing: border-box; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .panel, .fab {
+      --bg: #ffffff;
+      --soft: #f6f7f9;
+      --soft2: #eceef2;
+      --fg: #101318;
+      --fg2: #5b6270;
+      --fg3: #8f95a3;
+      --line: #eaecf0;
+      --accent: #fb7299;
+      --accent2: #8b6cff;
+      --ok: #12b76a;
+      --warn: #f79009;
+      --err: #f04438;
+    }
+    @media (prefers-color-scheme: dark) {
+      .panel, .fab {
+        --bg: #16181d;
+        --soft: #1d2027;
+        --soft2: #272b34;
+        --fg: #eceef3;
+        --fg2: #a4abba;
+        --fg3: #737b8b;
+        --line: #2a2e37;
+      }
+    }
     .panel {
-      width: 288px; background: #1f2026; color: #e6e6e8; border-radius: 12px;
-      box-shadow: 0 8px 28px rgba(0,0,0,.45); border: 1px solid rgba(251,114,153,.28);
-      overflow: hidden; font-size: 12px; line-height: 1.5; user-select: none;
+      width: 302px; background: var(--bg); color: var(--fg);
+      border: 1px solid var(--line); border-radius: 16px;
+      box-shadow: 0 2px 6px rgba(16,19,24,.05), 0 22px 48px -22px rgba(16,19,24,.45);
+      overflow-x: hidden; overflow-y: auto; max-height: calc(100vh - 24px);
+      font-size: 12px; line-height: 1.5; user-select: none;
+      -webkit-font-smoothing: antialiased;
     }
-    .head {
-      display: flex; align-items: center; gap: 6px; padding: 9px 10px;
-      background: linear-gradient(135deg, #fb7299, #b23a5e); cursor: move;
-    }
-    .title { font-size: 13px; font-weight: 600; color: #fff; flex: 1; }
-    .ver { font-size: 10px; color: rgba(255,255,255,.7); }
-    .ico {
-      width: 20px; height: 20px; border-radius: 5px; border: 0; cursor: pointer;
-      background: rgba(255,255,255,.18); color: #fff; font-size: 12px; line-height: 1; padding: 0;
-    }
-    .ico:hover { background: rgba(255,255,255,.34); }
-    .body { padding: 8px 10px 10px; }
-    .body.hide { display: none; }
-    .tasks { display: grid; gap: 2px; margin-bottom: 8px; }
-    .task { display: flex; align-items: center; gap: 7px; padding: 3px 2px; }
-    .dot { width: 7px; height: 7px; border-radius: 50%; background: #5a5c66; flex: 0 0 auto; }
-    .task .name { flex: 1; color: #c9cad1; }
-    .task .st { color: #85879a; font-size: 11px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .task[data-s="doing"] .dot { background: #ffb02e; animation: pulse 1s infinite; }
-    .task[data-s="doing"] .st { color: #ffb02e; }
-    .task[data-s="ok"] .dot { background: #46c46a; }
-    .task[data-s="ok"] .st { color: #46c46a; }
-    .task[data-s="fail"] .dot { background: #ff5c5c; }
-    .task[data-s="fail"] .st { color: #ff5c5c; }
-    .task[data-s="skip"] .st { color: #6b6d7a; }
-    @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-    .log {
-      height: 96px; overflow-y: auto; background: #17181d; border-radius: 7px;
-      padding: 6px 7px; font-size: 11px; color: #9a9cab; white-space: pre-wrap;
-      word-break: break-all; user-select: text; font-family: Consolas, Menlo, monospace;
-    }
-    .log::-webkit-scrollbar { width: 5px; }
-    .log::-webkit-scrollbar-thumb { background: #3a3c46; border-radius: 3px; }
-    .actions { display: flex; gap: 6px; margin-top: 8px; }
-    .btn {
-      flex: 1; border: 1px solid #3a3c46; background: #26282f; color: #d6d7dd;
-      border-radius: 7px; padding: 6px 0; font-size: 12px; cursor: pointer;
-    }
-    .btn:hover { background: #303239; }
-    .btn.primary { background: #fb7299; border-color: #fb7299; color: #fff; font-weight: 600; }
-    .btn.primary:hover { background: #ff86a9; }
-    .btn:disabled { opacity: .45; cursor: not-allowed; }
-    .settings { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #3a3c46; }
+    .panel::-webkit-scrollbar { width: 5px; }
+    .panel::-webkit-scrollbar-thumb { background: var(--soft2); border-radius: 3px; }
+    .head { display: flex; align-items: center; gap: 7px; padding: 13px 12px 10px 14px; cursor: move; }
+    .logo { width: 19px; height: 19px; border-radius: 6px; flex: 0 0 auto; background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 4px 10px -4px rgba(251,114,153,.85); }
+    .logo.sm { width: 7px; height: 7px; border-radius: 50%; box-shadow: none; background: #cbd0d9; }
+    .title { flex: 1; font-size: 12.5px; font-weight: 600; letter-spacing: .01em; white-space: nowrap; }
+    .ver { font-size: 10px; color: var(--fg3); font-variant-numeric: tabular-nums; margin-right: 2px; }
+    .ico { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--fg3); cursor: pointer; transition: background .15s, color .15s; }
+    .ico:hover { background: var(--soft); color: var(--fg); }
+    .ico svg { width: 13px; height: 13px; }
+    .exp { margin: 0 14px 10px; padding: 11px 12px 10px; border-radius: 12px; background: var(--soft); border: 1px solid var(--line); }
+    .exp-top { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+    .lv { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent2)); font-variant-numeric: tabular-nums; }
+    .exp-num { flex: 1; text-align: right; font-size: 11.5px; color: var(--fg2); font-variant-numeric: tabular-nums; }
+    .mini { width: 18px; height: 18px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--fg3); cursor: pointer; transition: background .15s, color .15s; }
+    .mini:hover { background: var(--soft2); color: var(--fg); }
+    .mini svg { width: 12px; height: 12px; }
+    .bar { height: 6px; border-radius: 999px; background: rgba(140,148,166,.2); overflow: hidden; }
+    .bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .55s cubic-bezier(.4,0,.2,1); }
+    .exp-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 10.5px; color: var(--fg3); }
+    .exp-foot .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .days { flex: 0 0 auto; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+    .exp[data-s="max"] .days { color: var(--ok); }
+    .tasks { padding: 0 7px 2px; }
+    .task { display: flex; align-items: center; gap: 8px; padding: 6px 7px; border-radius: 9px; transition: background .15s; }
+    .task:hover { background: var(--soft); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #cbd0d9; flex: 0 0 auto; }
+    .task .name { flex: 1; color: var(--fg2); }
+    .task .st { font-size: 10.5px; color: var(--fg3); max-width: 156px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .task[data-s="doing"] .dot { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+    .task[data-s="doing"] .st { color: var(--warn); }
+    .task[data-s="ok"] .dot { background: var(--ok); }
+    .task[data-s="ok"] .st { color: var(--ok); }
+    .task[data-s="fail"] .dot { background: var(--err); }
+    .task[data-s="fail"] .st { color: var(--err); }
+    .log { margin: 8px 14px 12px; height: 84px; overflow-y: auto; padding: 8px 10px; border-radius: 10px; background: var(--soft); color: var(--fg2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; user-select: text; }
+    .log:not(:empty) { -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 9px); mask-image: linear-gradient(180deg, transparent 0, #000 9px); }
+    .log::-webkit-scrollbar { width: 4px; }
+    .log::-webkit-scrollbar-thumb { background: var(--soft2); border-radius: 2px; }
+    .log:empty::before { content: "等待执行…"; color: var(--fg3); }
+    .actions { display: flex; gap: 7px; padding: 0 14px 13px; }
+    .btn { flex: 1; height: 33px; border-radius: 9px; border: 1px solid var(--line); background: var(--soft); color: var(--fg); font-size: 12px; font-weight: 500; cursor: pointer; transition: background .15s, transform .1s; }
+    .btn:hover { background: var(--soft2); }
+    .btn:active { transform: scale(.985); }
+    .btn.primary { flex: 1.4; border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-weight: 600; box-shadow: 0 8px 18px -10px rgba(251,114,153,.95); }
+    .btn.primary:hover { filter: brightness(1.04); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .settings { display: none; padding: 0 14px 13px; }
     .settings.show { display: block; }
-    .row { display: flex; align-items: center; justify-content: space-between; padding: 3px 0; color: #c2c3cb; }
-    .row input[type=checkbox] { accent-color: #fb7299; width: 14px; height: 14px; cursor: pointer; }
-    .row input[type=number] {
-      width: 56px; background: #26282f; color: #e6e6e8; border: 1px solid #3a3c46;
-      border-radius: 5px; padding: 2px 5px; font-size: 11px; text-align: center;
-    }
-    .tip { margin-top: 6px; font-size: 10px; color: #7b7d8c; line-height: 1.45; }
-    .fab {
-      display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px 0 10px;
-      border-radius: 999px; cursor: pointer; user-select: none; white-space: nowrap;
-      background: rgba(31,32,38,.94); color: #e6e6e8; font-size: 12px; font-weight: 600;
-      border: 1px solid rgba(251,114,153,.5); box-shadow: 0 6px 20px rgba(0,0,0,.4);
-      backdrop-filter: blur(6px); transition: border-color .15s, transform .15s;
-    }
-    .fab:hover { border-color: #fb7299; transform: translateY(-1px); }
-    .fab .dot { width: 7px; height: 7px; border-radius: 50%; background: #5a5c66; flex: 0 0 auto; }
-    .fab .badge { color: #85879a; font-weight: 400; font-size: 11px; }
-    .fab[data-s="doing"] .dot { background: #ffb02e; animation: pulse 1s infinite; }
-    .fab[data-s="ok"] .dot { background: #46c46a; }
-    .fab[data-s="fail"] .dot { background: #ff5c5c; }
+    .row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; color: var(--fg2); font-size: 11.5px; }
+    .row input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+    .row input[type=number] { width: 58px; height: 24px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--fg); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
+    .tip { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--fg3); line-height: 1.6; }
+    .fab { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px 0 12px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 10px 26px -12px rgba(16,19,24,.55); color: var(--fg); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: transform .16s, box-shadow .16s; }
+    .fab:hover { transform: translateY(-1px); box-shadow: 0 14px 30px -12px rgba(16,19,24,.65); }
+    .fab .badge { font-size: 10.5px; font-weight: 400; color: var(--fg3); font-variant-numeric: tabular-nums; }
+    .fab[data-s="doing"] .logo.sm { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+    .fab[data-s="ok"] .logo.sm { background: var(--ok); }
+    .fab[data-s="fail"] .logo.sm { background: var(--err); }
+    @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
   `;
 
   function panelHTML() {
@@ -661,34 +797,45 @@
       `<div class="task" data-t="${t.key}" data-s="idle"><i class="dot"></i><span class="name">${t.label}</span><span class="st">待执行</span></div>`
     ).join('');
     return `
-      <div class="fab" data-act="open" data-s="idle" title="B站每日任务助手（点击展开）">
-        <i class="dot"></i><span>每日任务</span><span class="badge">0/0</span>
+      <div class="fab" data-act="open" data-s="idle">
+        <i class="logo sm"></i><span>每日任务</span><span class="badge">0/0</span>
       </div>
       <div class="panel">
         <div class="head">
+          <i class="logo"></i>
           <span class="title">B站每日任务</span>
           <span class="ver">v${VERSION}</span>
-          <button class="ico" data-act="min" title="收起">—</button>
-          <button class="ico" data-act="hide" title="隐藏（可从油猴菜单重新打开）">×</button>
+          <button class="ico" data-act="cfg" title="设置">${ICON.cfg}</button>
+          <button class="ico" data-act="min" title="收起">${ICON.min}</button>
+          <button class="ico" data-act="hide" title="隐藏">${ICON.hide}</button>
         </div>
-        <div class="body">
-          <div class="tasks">${rows}</div>
-          <div class="log"></div>
-          <div class="actions">
-            <button class="btn primary" data-act="run">立即执行</button>
-            <button class="btn" data-act="stop">停止</button>
-            <button class="btn" data-act="cfg">设置</button>
+        <div class="exp" data-s="idle">
+          <div class="exp-top">
+            <span class="lv">LV--</span>
+            <span class="exp-num">读取中</span>
+            <button class="mini" data-act="exp" title="刷新经验值">${ICON.sync}</button>
           </div>
-          <div class="settings">
-            <label class="row"><span>观看视频</span><input type="checkbox" data-cfg="enableWatch"></label>
-            <label class="row"><span>分享视频</span><input type="checkbox" data-cfg="enableShare"></label>
-            <label class="row"><span>投币</span><input type="checkbox" data-cfg="enableCoin"></label>
-            <label class="row"><span>观看秒数</span><input type="number" min="10" max="600" step="10" data-cfg="watchSeconds"></label>
-            <label class="row"><span>投币经验目标</span><input type="number" min="0" max="50" step="10" data-cfg="coinExpTarget"></label>
-            <label class="row"><span>投币时点赞</span><input type="checkbox" data-cfg="selectLike"></label>
-            <label class="row"><span>每天自动运行</span><input type="checkbox" data-cfg="autoRun"></label>
-            <div class="tip">投币会消耗真实硬币（每天上限 5 枚）。观看任务在屏幕外播放，请保持本标签页在前台或允许后台播放。</div>
+          <div class="bar"><i></i></div>
+          <div class="exp-foot">
+            <span class="hint">正在获取经验值</span>
+            <span class="days"></span>
           </div>
+        </div>
+        <div class="tasks">${rows}</div>
+        <div class="log"></div>
+        <div class="actions">
+          <button class="btn primary" data-act="run">开始执行</button>
+          <button class="btn" data-act="stop">停止</button>
+        </div>
+        <div class="settings">
+          <label class="row"><span>观看视频</span><input type="checkbox" data-cfg="enableWatch"></label>
+          <label class="row"><span>分享视频</span><input type="checkbox" data-cfg="enableShare"></label>
+          <label class="row"><span>投币</span><input type="checkbox" data-cfg="enableCoin"></label>
+          <label class="row"><span>观看秒数</span><input type="number" min="10" max="600" step="10" data-cfg="watchSeconds"></label>
+          <label class="row"><span>投币经验目标</span><input type="number" min="0" max="50" step="10" data-cfg="coinExpTarget"></label>
+          <label class="row"><span>投币时点赞</span><input type="checkbox" data-cfg="selectLike"></label>
+          <label class="row"><span>每天自动运行</span><input type="checkbox" data-cfg="autoRun"></label>
+          <div class="tip">投币会消耗真实硬币（每日上限 5 枚）。观看任务在屏幕外播放，请保持本标签页在前台或允许后台播放。</div>
         </div>
       </div>
     `;
@@ -705,24 +852,31 @@
 
       this.el = this.shadow.querySelector('.panel');
       this.fab = this.shadow.querySelector('.fab');
-      this.body = this.shadow.querySelector('.body');
       this.logBox = this.shadow.querySelector('.log');
       this.settings = this.shadow.querySelector('.settings');
+      this.expBox = this.shadow.querySelector('.exp');
       this.runBtn = this.shadow.querySelector('[data-act="run"]');
+      this.badge = this.fab.querySelector('.badge');
+      this.rows = new Map();
+      this.shadow.querySelectorAll('.task').forEach((r) => this.rows.set(r.dataset.t, r));
       this.collapsed = true;
       this.dragged = false;
+      this.dragEndAt = 0;
 
       this.restorePos();
       this.bind();
       this.syncSettings();
-      this.setButtons();
       this.applyCollapsed();
+      this.setButtons();
       this.updateFab();
+      this.renderExp(expInfo, null);
     }
 
     restorePos() {
       const pos = store.get(KEY_POS, null);
-      if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+      const ok = pos && Number.isFinite(pos.left) && Number.isFinite(pos.top) &&
+        pos.left < window.innerWidth - 40 && pos.top < window.innerHeight - 40;
+      if (ok) {
         this.host.style.left = Math.max(0, pos.left) + 'px';
         this.host.style.top = Math.max(0, pos.top) + 'px';
       } else {
@@ -739,9 +893,16 @@
         if (a === 'run') runAll('手动');
         else if (a === 'stop') stopAll();
         else if (a === 'cfg') this.settings.classList.toggle('show');
-        else if (a === 'open') { if (this.dragged) { this.dragged = false; return; } this.open(); }
+        else if (a === 'open') { if (Date.now() - this.dragEndAt < 250) return; this.open(); }
         else if (a === 'min') this.collapse();
         else if (a === 'hide') this.hide();
+        else if (a === 'exp') {
+          const old = this.expBox.querySelector('.exp-num').textContent;
+          this.expBox.querySelector('.exp-num').textContent = '刷新中';
+          refreshExp(null, false).then(() => {
+            if (this.expBox.querySelector('.exp-num').textContent === '刷新中') this.expBox.querySelector('.exp-num').textContent = old;
+          });
+        }
       });
 
       this.shadow.addEventListener('change', (e) => {
@@ -765,42 +926,50 @@
         this.updateFab();
       });
 
-      this.bindDrag(this.shadow.querySelector('.head'), false);
-      this.bindDrag(this.fab, true);
+      this.bindDrag(this.shadow.querySelector('.head'));
+      this.bindDrag(this.fab);
     }
 
-    bindDrag(handle, fromSelf) {
-      let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    bindDrag(handle) {
+      let dragging = false;
+      let sx = 0, sy = 0, ox = 0, oy = 0, nx = 0, ny = 0, raf = 0;
+      const apply = () => {
+        raf = 0;
+        this.host.style.left = nx + 'px';
+        this.host.style.top = ny + 'px';
+        this.host.style.right = 'auto';
+        this.host.style.bottom = 'auto';
+      };
       handle.addEventListener('pointerdown', (e) => {
-        if (!fromSelf && e.target.closest('[data-act]')) return;
-        const r = this.el.getBoundingClientRect();
-        const fr = this.fab.getBoundingClientRect();
-        const box = this.collapsed ? fr : r;
+        if (e.button !== undefined && e.button !== 0) return;
+        if (e.target.closest('button')) return;
+        const box = (this.collapsed ? this.fab : this.el).getBoundingClientRect();
         dragging = true;
         this.dragged = false;
         sx = e.clientX; sy = e.clientY; ox = box.left; oy = box.top;
-        handle.setPointerCapture(e.pointerId);
+        try { handle.setPointerCapture(e.pointerId); } catch (err) {}
       });
       handle.addEventListener('pointermove', (e) => {
         if (!dragging) return;
         const dx = e.clientX - sx, dy = e.clientY - sy;
-        if (!this.dragged && Math.abs(dx) + Math.abs(dy) < 5) return;
+        if (!this.dragged && Math.abs(dx) + Math.abs(dy) < 4) return;
         this.dragged = true;
-        const left = Math.max(0, Math.min(window.innerWidth - 60, ox + dx));
-        const top = Math.max(0, Math.min(window.innerHeight - 30, oy + dy));
-        this.host.style.left = left + 'px';
-        this.host.style.top = top + 'px';
-        this.host.style.right = 'auto';
-        this.host.style.bottom = 'auto';
-      });
-      handle.addEventListener('pointerup', (e) => {
+        nx = Math.max(0, Math.min(window.innerWidth - 64, ox + dx));
+        ny = Math.max(0, Math.min(window.innerHeight - 40, oy + dy));
+        if (!raf) raf = requestAnimationFrame(apply);
+      }, { passive: true });
+      const end = (e) => {
         if (!dragging) return;
         dragging = false;
+        if (raf) { cancelAnimationFrame(raf); apply(); }
         try { handle.releasePointerCapture(e.pointerId); } catch (err) {}
         if (this.dragged) {
+          this.dragEndAt = Date.now();
           store.set(KEY_POS, { left: parseInt(this.host.style.left, 10) || 0, top: parseInt(this.host.style.top, 10) || 0 });
         }
-      });
+      };
+      handle.addEventListener('pointerup', end);
+      handle.addEventListener('pointercancel', end);
     }
 
     applyCollapsed() {
@@ -811,6 +980,8 @@
     open() {
       this.collapsed = false;
       this.applyCollapsed();
+      const age = expInfo && expInfo.at ? Date.now() - expInfo.at : Infinity;
+      if (age > 300000) refreshExp(null, true);
     }
 
     collapse() {
@@ -820,16 +991,20 @@
     }
 
     updateFab() {
-      const keys = TASK_DEFS.filter((t) =>
-        t.key === 'login' ||
-        (t.key === 'watch' && cfg.enableWatch) ||
-        (t.key === 'share' && cfg.enableShare) ||
-        (t.key === 'coin' && cfg.enableCoin)
-      ).map((t) => t.key);
+      let total = 1;
+      if (cfg.enableWatch) total++;
+      if (cfg.enableShare) total++;
+      if (cfg.enableCoin) total++;
+      const keys = ['login', 'watch', 'share', 'coin'].filter((k) =>
+        k === 'login' ||
+        (k === 'watch' && cfg.enableWatch) ||
+        (k === 'share' && cfg.enableShare) ||
+        (k === 'coin' && cfg.enableCoin)
+      );
       const done = keys.filter((k) => (state.tasks[k] || {}).status === 'ok').length;
       const failed = keys.some((k) => (state.tasks[k] || {}).status === 'fail');
-      this.fab.querySelector('.badge').textContent = `${done}/${keys.length}`;
-      this.fab.dataset.s = state.running ? 'doing' : failed ? 'fail' : (done === keys.length && done > 0) ? 'ok' : 'idle';
+      this.badge.textContent = `${done}/${total}`;
+      this.fab.dataset.s = state.running ? 'doing' : failed ? 'fail' : (done === total && done > 0) ? 'ok' : 'idle';
     }
 
     hide() {
@@ -857,18 +1032,59 @@
       if (this.runBtn) this.runBtn.disabled = !!state.running;
     }
 
-    appendLog(line) {
-      const atBottom = this.logBox.scrollTop + this.logBox.clientHeight >= this.logBox.scrollHeight - 4;
-      const div = document.createElement('div');
-      div.textContent = line;
-      this.logBox.appendChild(div);
-      while (this.logBox.childNodes.length > 200) this.logBox.removeChild(this.logBox.firstChild);
-      if (atBottom) this.logBox.scrollTop = this.logBox.scrollHeight;
+    appendLogs(lines) {
+      const box = this.logBox;
+      const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < lines.length; i++) {
+        const div = document.createElement('div');
+        div.textContent = lines[i];
+        frag.appendChild(div);
+      }
+      box.appendChild(frag);
+      let extra = box.childNodes.length - 200;
+      while (extra-- > 0) box.removeChild(box.firstChild);
+      if (atBottom) box.scrollTop = box.scrollHeight;
+    }
+
+    renderExp(info, st) {
+      const box = this.expBox;
+      const lvEl = box.querySelector('.lv');
+      const numEl = box.querySelector('.exp-num');
+      const barEl = box.querySelector('.bar i');
+      const hintEl = box.querySelector('.hint');
+      const daysEl = box.querySelector('.days');
+      if (!info) {
+        box.dataset.s = 'idle';
+        lvEl.textContent = 'LV--';
+        numEl.textContent = '未获取';
+        barEl.style.width = '0%';
+        hintEl.textContent = '经验值读取失败';
+        daysEl.textContent = '';
+        box.title = '';
+        return;
+      }
+      const sum = expSummary(info, st);
+      lvEl.textContent = 'LV' + info.level;
+      box.dataset.s = sum.max ? 'max' : 'idle';
+      barEl.style.width = (sum.ratio * 100).toFixed(2) + '%';
+      if (sum.max) {
+        numEl.textContent = `${numFmt.format(info.exp)} 经验`;
+        hintEl.textContent = '已达当前最高等级';
+        daysEl.textContent = '满级';
+      } else {
+        numEl.textContent = `${numFmt.format(info.exp)} / ${numFmt.format(info.next)}`;
+        hintEl.textContent = `距 LV${info.level + 1} 还差 ${numFmt.format(sum.remain)} 经验`;
+        daysEl.textContent = `约 ${sum.days} 天`;
+      }
+      box.title = sum.max
+        ? `当前 LV${info.level}，经验 ${numFmt.format(info.exp)}`
+        : `当前 LV${info.level}：${numFmt.format(info.exp)} / ${numFmt.format(info.next)}\n还差 ${numFmt.format(sum.remain)} 经验，今日最多还能拿 ${sum.todayLeft}\n按每日满额 ${DAILY_MAX_EXP} 经验估算，约 ${sum.days} 天升到 LV${info.level + 1}`;
     }
 
     setTask(key, status, text) {
       state.tasks[key] = { status, text: text || '' };
-      const row = this.shadow.querySelector(`.task[data-t="${key}"]`);
+      const row = this.rows.get(key);
       if (!row) return;
       row.dataset.s = status;
       const st = row.querySelector('.st');
@@ -899,30 +1115,41 @@
 
   function bootstrap() {
     try {
+      const cached = store.get(KEY_EXP, null);
+      if (cached && Number.isFinite(cached.exp)) expInfo = cached;
+    } catch (e) {}
+
+    try {
       panel = new Panel();
     } catch (e) {
       console.error('[B站每日任务] 面板创建失败', e);
       panel = null;
     }
 
-    log(`已加载 v${VERSION}，右下角「每日任务」胶囊点一下展开设置面板。建议在 www.bilibili.com 使用。`);
-    const dom = readRewardPanel();
-    if (dom) {
-      const part = Object.keys(dom).map((k) => {
-        const it = dom[k];
-        return it.exp !== null ? `${k} ${it.exp}/${it.target}` : `${k} ${it.done ? '✓' : '×'}`;
-      });
-      log('页面「每日奖励」读到：' + part.join('，'));
-    }
+    log(`已加载 v${VERSION}，右下角胶囊点一下展开。`);
+    idle(() => {
+      const dom = readRewardPanel(true);
+      if (dom) {
+        const part = Object.keys(dom).map((k) => {
+          const it = dom[k];
+          return it.exp !== null ? `${k} ${it.exp}/${it.target}` : `${k} ${it.done ? '✓' : '×'}`;
+        });
+        log('页面「每日奖励」读到：' + part.join('，'));
+      }
+    });
 
     if (typeof GM_registerMenuCommand === 'function') {
       GM_registerMenuCommand('▶ 立即执行每日任务', () => runAll('菜单'));
       GM_registerMenuCommand('⏹ 停止', stopAll);
+      GM_registerMenuCommand('🔄 刷新经验值', () => refreshExp(null, false));
       GM_registerMenuCommand('👁 显示/隐藏面板', () => {
         if (!panel) return;
         if (panel.visible) panel.hide(); else panel.show();
       });
     }
+
+    const stale = !expInfo || !expInfo.at || Date.now() - expInfo.at > 600000;
+    if (stale) idle(() => { refreshExp(null, true); });
 
     if (cfg.autoRun && location.hostname === 'www.bilibili.com' && !state.running) {
       const s = loadDailyState();
@@ -932,7 +1159,7 @@
         log(`今日第 ${(s.runs || 0) + 1}/${maxRuns} 次自动执行将在 ${Math.round(delay / 1000)} 秒后开始`);
         setTimeout(() => { if (!state.running) runAll('每日自动'); }, delay);
       } else {
-        log(`今日自动执行已达 ${s.runs} 次上限，可点「立即执行」手动再跑`);
+        log(`今日自动执行已达 ${s.runs} 次上限，可点「开始执行」手动再跑`);
       }
     }
   }
