@@ -1,10 +1,14 @@
 // ==UserScript==
 // @name         B站每日任务助手 · 自动完成每日奖励
-// @namespace    https://github.com/Momomo79/bili-daily-helper
-// @version      2.0.0
+// @version      2.0.1
 // @description  自动完成哔哩哔哩网页版每日任务：观看视频、分享视频、投币；面板实时显示经验值与升级天数预测。
 // @author       Momomo
 // @license      MIT
+// @homepageURL  https://greasyfork.org/zh-CN/scripts/601799-b%E7%AB%99%E6%AF%8F%E6%97%A5%E4%BB%BB%E5%8A%A1%E5%8A%A9%E6%89%8B-%E8%87%AA%E5%8A%A8%E5%AE%8C%E6%88%90%E6%AF%8F%E6%97%A5%E5%A5%96%E5%8A%B1
+// @supportURL   https://greasyfork.org/zh-CN/scripts/601799/feedback
+// @updateURL    https://update.greasyfork.org/scripts/601799/B%E7%AB%99%E6%AF%8F%E6%97%A5%E4%BB%BB%E5%8A%A1%E5%8A%A9%E6%89%8B%20%C2%B7%20%E8%87%AA%E5%8A%A8%E5%AE%8C%E6%88%90%E6%AF%8F%E6%97%A5%E5%A5%96%E5%8A%B1.meta.js
+// @downloadURL  https://update.greasyfork.org/scripts/601799/B%E7%AB%99%E6%AF%8F%E6%97%A5%E4%BB%BB%E5%8A%A1%E5%8A%A9%E6%89%8B%20%C2%B7%20%E8%87%AA%E5%8A%A8%E5%AE%8C%E6%88%90%E6%AF%8F%E6%97%A5%E5%A5%96%E5%8A%B1.user.js
+// @namespace    https://github.com/Momomo79/bili-daily-helper
 // @match        https://www.bilibili.com/*
 // @match        https://space.bilibili.com/*
 // @match        https://t.bilibili.com/*
@@ -27,7 +31,7 @@
   if (window.__BDH_LOADED__) return;
   window.__BDH_LOADED__ = true;
 
-  const VERSION = '2.0.0';
+  const VERSION = '2.0.1';
   const NS = 'bili-daily-helper';
   const KEY_CFG = NS + ':cfg';
   const KEY_STATE = NS + ':state';
@@ -783,6 +787,8 @@
     .row input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
     .row input[type=number] { width: 58px; height: 24px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); color: var(--fg); font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
     .tip { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--fg3); line-height: 1.6; }
+    .credit { margin-top: 6px; font-size: 10px; color: var(--fg3); opacity: .85; }
+    .credit b { color: var(--fg2); font-weight: 600; }
     .fab { display: flex; align-items: center; gap: 7px; height: 34px; padding: 0 13px 0 12px; border-radius: 999px; background: var(--bg); border: 1px solid var(--line); box-shadow: 0 10px 26px -12px rgba(16,19,24,.55); color: var(--fg); font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: transform .16s, box-shadow .16s; }
     .fab:hover { transform: translateY(-1px); box-shadow: 0 14px 30px -12px rgba(16,19,24,.65); }
     .fab .badge { font-size: 10.5px; font-weight: 400; color: var(--fg3); font-variant-numeric: tabular-nums; }
@@ -836,6 +842,7 @@
           <label class="row"><span>投币时点赞</span><input type="checkbox" data-cfg="selectLike"></label>
           <label class="row"><span>每天自动运行</span><input type="checkbox" data-cfg="autoRun"></label>
           <div class="tip">投币会消耗真实硬币（每日上限 5 枚）。观看任务在屏幕外播放，请保持本标签页在前台或允许后台播放。</div>
+          <div class="credit">由 <b>Momomo</b> 制作 · 基于 MIT 许可证开源</div>
         </div>
       </div>
     `;
